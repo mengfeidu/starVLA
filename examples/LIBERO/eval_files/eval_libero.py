@@ -5,6 +5,15 @@ import math
 import os
 import pathlib
 import time
+from typing import Optional, Union
+
+# Select the MuJoCo/OpenGL rendering backend BEFORE importing libero (which
+# transitively imports mujoco/robosuite and binds the GL backend at import
+# time). This node has no system libEGL, so default to CPU software rendering
+# via OSMesa. Override by exporting MUJOCO_GL/PYOPENGL_PLATFORM (e.g. "egl").
+os.environ.setdefault("MUJOCO_GL", "osmesa")
+os.environ.setdefault("PYOPENGL_PLATFORM", "osmesa")
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import imageio
 import numpy as np
@@ -12,15 +21,13 @@ import tqdm
 import tyro
 from libero.libero import benchmark, get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
-
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from examples.LIBERO.eval_files.model2libero_interface import ModelClient
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
 
 
-def _binarize_gripper_open(open_val: np.ndarray | float) -> np.ndarray:
+def _binarize_gripper_open(open_val: Union[np.ndarray, float]) -> np.ndarray:
     arr = np.asarray(open_val, dtype=np.float32).reshape(-1)
     v = float(arr[0])
     bin_val = 1.0 - 2.0 * (v > 0.5)
@@ -41,22 +48,32 @@ class Args:
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
     num_trials_per_task: int = 50  # Number of rollouts per task
     max_tasks: int = -1  # If > 0, limit the number of tasks evaluated (smoke / quick check). -1 = run all.
+    # Subset of task ids to evaluate, e.g. "0,1,2". Empty = all tasks. Used to
+    # shard a suite across many parallel processes (one shard per process).
+    task_ids: str = ""
 
     #################################################################################################################
     # Utils
     #################################################################################################################
     video_out_path: str = "experiments/libero/logs"  # Path to save videos
+    # Which rollout videos to write: "failure" (only failed episodes, saves disk),
+    # "all", or "none".
+    save_videos: str = "failure"
 
     seed: int = 7  # Random Seed (for reproducibility)
 
     pretrained_path: str = ""
 
     # Dataset key for un-normalization. None = auto (only if model trained on a single dataset).
-    unnorm_key: str | None = None
+    unnorm_key: Optional[str] = None
 
     post_process_action: bool = True
 
     job_name: str = "test"
+
+    # If set, write a JSON summary of per-task episodes/successes to this path
+    # (used to aggregate sharded runs into a per-suite success rate).
+    result_json: str = ""
 
 
 def eval_libero(args: Args) -> None:
@@ -94,13 +111,23 @@ def eval_libero(args: Args) -> None:
         unnorm_key=args.unnorm_key,
     )
 
-    # Optional smoke-test cap (still useful for quick verification with -1 = full run).
-    n_eval_tasks = num_tasks_in_suite if args.max_tasks <= 0 else min(args.max_tasks, num_tasks_in_suite)
-    logging.info(f"Evaluating {n_eval_tasks} of {num_tasks_in_suite} tasks (max_tasks={args.max_tasks})")
+    # Resolve which task ids to evaluate. An explicit `task_ids` (e.g. "0,1")
+    # takes precedence and is used to shard a suite across parallel processes;
+    # otherwise fall back to the first `max_tasks` (or all) tasks.
+    if args.task_ids.strip():
+        task_id_list = [int(x) for x in args.task_ids.replace(",", " ").split()]
+        invalid = [t for t in task_id_list if t < 0 or t >= num_tasks_in_suite]
+        if invalid:
+            raise ValueError(f"task_ids {invalid} out of range [0, {num_tasks_in_suite})")
+    else:
+        n_eval_tasks = num_tasks_in_suite if args.max_tasks <= 0 else min(args.max_tasks, num_tasks_in_suite)
+        task_id_list = list(range(n_eval_tasks))
+    logging.info(f"Evaluating task ids {task_id_list} of {num_tasks_in_suite} tasks in {args.task_suite_name}")
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
-    for task_id in tqdm.tqdm(range(n_eval_tasks)):
+    per_task_results = {}
+    for task_id in tqdm.tqdm(task_id_list):
         # Get task
         task = task_suite.get_task(task_id)
 
@@ -212,14 +239,16 @@ def eval_libero(args: Args) -> None:
             task_episodes += 1
             total_episodes += 1
 
-            # Save a replay video of the episode
+            # Save a replay video of the episode (default: only failures, to save disk).
             suffix = "success" if done else "failure"
-            task_segment = task_description.replace(" ", "_")
-            imageio.mimwrite(
-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4",
-                [np.asarray(x) for x in replay_images],
-                fps=10,
-            )
+            write_video = args.save_videos == "all" or (args.save_videos == "failure" and not done)
+            if write_video and len(replay_images) > 0:
+                task_segment = task_description.replace(" ", "_")
+                imageio.mimwrite(
+                    pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.mp4",
+                    [np.asarray(x) for x in replay_images],
+                    fps=10,
+                )
 
             full_actions = np.stack(full_actions)
             # np.save(pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_episode{episode_idx}_{suffix}.npy", full_actions)
@@ -231,11 +260,27 @@ def eval_libero(args: Args) -> None:
             logging.info(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
 
         # Log final results
+        per_task_results[task_id] = {"episodes": task_episodes, "successes": task_successes}
         logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
         logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
 
     logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
     logging.info(f"Total episodes: {total_episodes}")
+
+    # Optionally dump a machine-readable summary for cross-shard aggregation.
+    if args.result_json:
+        summary = {
+            "task_suite_name": args.task_suite_name,
+            "task_ids": task_id_list,
+            "num_trials_per_task": args.num_trials_per_task,
+            "total_episodes": total_episodes,
+            "total_successes": total_successes,
+            "per_task": {str(k): v for k, v in per_task_results.items()},
+        }
+        pathlib.Path(args.result_json).parent.mkdir(parents=True, exist_ok=True)
+        with open(args.result_json, "w") as f:
+            json.dump(summary, f, indent=2)
+        logging.info(f"Wrote result summary to {args.result_json}")
 
 
 def _get_libero_env(task, resolution, seed):

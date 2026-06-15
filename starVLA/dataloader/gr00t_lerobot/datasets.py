@@ -1396,6 +1396,16 @@ class LeRobotSingleDataset(Dataset):
             state = np.concatenate(state, axis=1).astype(np.float16)
             sample["state"] = state
 
+        # Optional: also expose the future observation o_{t+H} (last sampled video
+        # frame). Off by default; enabled by ActionEffect's QwenEffect framework via
+        # data_cfg.include_future_obs together with a video delta_indices that ends at
+        # the action horizon (see examples/ActionEffect/train_files/data_registry).
+        if self.data_cfg is not None and self.data_cfg.get("include_future_obs", False) not in ["False", False]:
+            future_images = []
+            for video_key in self.modality_keys["video"]:
+                future_images.append(Image.fromarray(data[video_key][-1]).resize((224, 224)))
+            sample["future_image"] = future_images
+
         return sample
 
     def get_step_data(self, trajectory_id: int, base_index: int) -> dict:
