@@ -10,6 +10,9 @@ Schema follows the official robocasa LeRobot conversion (see
 * 3 cameras at 256x256, 20 fps. We only use ``robot0_agentview_left`` for training.
 """
 
+import os
+from pathlib import Path
+
 from starVLA.dataloader.gr00t_lerobot.datasets import ModalityConfig
 from starVLA.dataloader.gr00t_lerobot.transform.base import ComposedModalityTransform
 from starVLA.dataloader.gr00t_lerobot.transform.state_action import (
@@ -105,6 +108,12 @@ ROBOT_TYPE_TO_EMBODIMENT_TAG = {
 #   python -m robocasa.utils.dataset_registry  # has constants
 #   # or run the helper at examples/Robocasa_365/train_files/dump_target_human_paths.py
 _ROBOT_TAG = "panda_omron_robocasa365"
+_ROBOCASA365_DATA_ROOT = Path(
+    os.environ.get(
+        "ROBOCASA365_DATA_ROOT",
+        "/aifs4su/hansirui_4th/dumengfei/benchmark/robocasa/datasets",
+    )
+)
 
 # Atomic single-skill tasks (target/human split, 18 tasks).
 _TARGET_HUMAN_ATOMIC = {
@@ -172,6 +181,24 @@ def _entries(path_dict):
     return [(f"{p}/lerobot", 1.0, _ROBOT_TAG) for p in path_dict.values()]
 
 
+def _scan_pretrain_entries(task_type):
+    """Build pretrain mixture entries from the local RoboCasa365 data root."""
+    base_dir = _ROBOCASA365_DATA_ROOT / "v1.0" / "pretrain" / task_type
+    if not base_dir.is_dir():
+        return []
+
+    entries = []
+    for task_dir in sorted(path for path in base_dir.iterdir() if path.is_dir()):
+        for lerobot_dir in sorted(task_dir.glob("*/lerobot")):
+            entries.append((str(lerobot_dir.relative_to(_ROBOCASA365_DATA_ROOT)), 1.0, _ROBOT_TAG))
+            break
+    return entries
+
+
+_PRETRAIN_HUMAN_ATOMIC = _scan_pretrain_entries("atomic")
+_PRETRAIN_HUMAN_COMPOSITE = _scan_pretrain_entries("composite")
+
+
 DATASET_NAMED_MIXTURES = {
     # ------- minimal walk-through mixture (1 atomic task) -------
     "robocasa365_open_drawer_target_human": [
@@ -182,4 +209,8 @@ DATASET_NAMED_MIXTURES = {
     "robocasa365_composite_target_human_all": _entries(_TARGET_HUMAN_COMPOSITE),
     "robocasa365_target_human_all":           _entries({**_TARGET_HUMAN_ATOMIC,
                                                        **_TARGET_HUMAN_COMPOSITE}),
+    # ------- pretrain/human mixtures discovered from ROBOCASA365_DATA_ROOT -------
+    "robocasa365_atomic_pretrain_human_all":    _PRETRAIN_HUMAN_ATOMIC,
+    "robocasa365_composite_pretrain_human_all": _PRETRAIN_HUMAN_COMPOSITE,
+    "robocasa365_pretrain_human_all":           _PRETRAIN_HUMAN_ATOMIC + _PRETRAIN_HUMAN_COMPOSITE,
 }
