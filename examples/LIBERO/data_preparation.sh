@@ -6,18 +6,19 @@ set -euo pipefail
 # or
 #   bash examples/LIBERO/data_preparation.sh /path/to/dir
 
-DEST="${DEST:-${1:-}}"
-if [[ -z "${DEST}" ]]; then
-  echo "ERROR: DEST is not set."
-  echo "  export DEST=/path/to/dir && bash examples/LIBERO/data_preparation.sh"
-  echo "  or: bash examples/LIBERO/data_preparation.sh /path/to/dir"
-  exit 1
-fi
+# DEST="${DEST:-${1:-}}"
+# if [[ -z "${DEST}" ]]; then
+#   echo "ERROR: DEST is not set."
+#   echo "  export DEST=/path/to/dir && bash examples/LIBERO/data_preparation.sh"
+#   echo "  or: bash examples/LIBERO/data_preparation.sh /path/to/dir"
+#   exit 1
+# fi
 
+DEST=/aifs4su/hansirui_4th/data/playground
 CUR="$(pwd)"
 mkdir -p "$DEST"
 
-python -m pip install -U "huggingface-hub==0.35.3"
+# python -m pip install -U "huggingface-hub==0.35.3"
 
 for repo in \
   IPEC-COMMUNITY/libero_spatial_no_noops_1.0.0_lerobot \
@@ -40,3 +41,5 @@ cp "$CUR/examples/LIBERO/train_files/modality.json" "$CUR/playground/Datasets/LE
 cp "$CUR/examples/LIBERO/train_files/modality.json" "$CUR/playground/Datasets/LEROBOT_LIBERO_DATA/libero_goal_no_noops_1.0.0_lerobot/meta"
 cp "$CUR/examples/LIBERO/train_files/modality.json" "$CUR/playground/Datasets/LEROBOT_LIBERO_DATA/libero_object_no_noops_1.0.0_lerobot/meta"
 cp "$CUR/examples/LIBERO/train_files/modality.json" "$CUR/playground/Datasets/LEROBOT_LIBERO_DATA/libero_spatial_no_noops_1.0.0_lerobot/meta"
+
+

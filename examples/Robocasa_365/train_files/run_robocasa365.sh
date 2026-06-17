@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eo pipefail
+
+CONDA_BASE="${CONDA_BASE:-/aifs4su/hansirui_4th/miniconda3}"
+CONDA_ENV="${CONDA_ENV:-starVLA}"
+
+if [[ "${CONDA_DEFAULT_ENV:-}" != "${CONDA_ENV}" ]]; then
+  source "${CONDA_BASE}/etc/profile.d/conda.sh"
+  conda activate "${CONDA_ENV}"
+fi
+
+set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"

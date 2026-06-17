@@ -20,27 +20,28 @@
 set -u
 
 # ---------------- cluster paths ----------------
-STARVLA_DIR=/opt/tiger/robot_policy/starVLA
-LIBERO_HOME=/mnt/bn/ic-vlm/personal/dumengfei/benchmarks/LIBERO
-STARVLA_PY=/mnt/bn/ic-vlm/personal/dumengfei/packages/anaconda3/envs/starVLA/bin/python
-LIBERO_PY=/mnt/bn/ic-vlm/personal/dumengfei/packages/anaconda3/envs/libero/bin/python
+STARVLA_DIR=/aifs4su/hansirui_4th/dumengfei/code/starVLA
+LIBERO_HOME=/aifs4su/hansirui_4th/dumengfei/benchmark/LIBERO
+STARVLA_PY=/aifs4su/hansirui_4th/miniconda3/envs/starVLA/bin/python
+LIBERO_PY=/aifs4su/hansirui_4th/miniconda3/envs/libero/bin/python
 
 cd "$STARVLA_DIR" || exit 1
 
 export PYTHONPATH="$STARVLA_DIR:$LIBERO_HOME:${PYTHONPATH:-}"
 export LIBERO_HOME
 export LIBERO_CONFIG_PATH="${LIBERO_CONFIG_PATH:-$HOME/.libero}"
-export MUJOCO_GL=osmesa
-export PYOPENGL_PLATFORM=osmesa
+RENDER_BACKEND="${RENDER_BACKEND:-egl}"  # egl works with the system NVIDIA EGL libs; use osmesa for CPU rendering.
+export MUJOCO_GL="$RENDER_BACKEND"
+export PYOPENGL_PLATFORM="$RENDER_BACKEND"
 export TOKENIZERS_PARALLELISM=false
 # Keep per-process CPU thread fan-out modest so many parallel renders coexist.
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-2}"
 
 # ---------------- config ----------------
-CKPT="${CKPT:-/mnt/hdfs/data/dumengfei/data/playground/Checkpoints/0608_qwenfast_libero_all_10ep_trail/checkpoints/steps_10685_pytorch_model.pt}"
+CKPT="${CKPT:-/aifs4su/hansirui_4th/dumengfei/experiments/starVLA/0615_qwenfast_libero90_ep2/final_model/pytorch_model.pt}"
 TASK_SUITES=(${TASK_SUITES:-libero_spatial libero_object libero_goal libero_10})
-GPU_LIST=(${GPU_LIST:-0 1 2 3})
+GPU_LIST=(${GPU_LIST:-2})
 BASE_PORT="${BASE_PORT:-6700}"
 NUM_TRIALS="${NUM_TRIALS:-50}"
 MAX_TASKS="${MAX_TASKS:--1}"          # cap tasks per suite (for quick checks); -1 = all
@@ -64,11 +65,36 @@ suite_ntasks() {
     esac
 }
 
-# ---------------- self-heal: OSMesa + LIBERO config ----------------
-if ! ldconfig -p 2>/dev/null | grep -qi "libOSMesa"; then
-    echo "[setup] installing libosmesa6 via apt"
-    sudo apt-get install -y libosmesa6 >/tmp/osmesa_install.log 2>&1
-fi
+# ---------------- self-heal: rendering backend + LIBERO config ----------------
+LIBERO_ENV_PREFIX="$(dirname "$(dirname "$LIBERO_PY")")"
+case "$RENDER_BACKEND" in
+    osmesa)
+        if ls "${LIBERO_ENV_PREFIX}/lib"/libOSMesa.so* >/dev/null 2>&1; then
+            export LD_LIBRARY_PATH="${LIBERO_ENV_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+        elif ! ldconfig -p 2>/dev/null | grep -qi "libOSMesa"; then
+            if [ "${AUTO_INSTALL_OSMESA:-0}" = "1" ] && command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+                echo "[setup] installing libosmesa6 via apt"
+                sudo apt-get update >/tmp/osmesa_apt_update.log 2>&1
+                sudo apt-get install -y libosmesa6 >/tmp/osmesa_install.log 2>&1
+            else
+                echo "[setup] ERROR: libOSMesa is required for RENDER_BACKEND=osmesa but was not found."
+                echo "[setup] Install system libosmesa6, or rerun with RENDER_BACKEND=egl."
+                exit 1
+            fi
+        fi
+        ;;
+    egl)
+        if ! ldconfig -p 2>/dev/null | grep -qi "libEGL"; then
+            echo "[setup] ERROR: libEGL is required for RENDER_BACKEND=egl but was not found."
+            echo "[setup] Install EGL/NVIDIA GL libraries, or rerun with RENDER_BACKEND=osmesa after installing libOSMesa."
+            exit 1
+        fi
+        ;;
+    *)
+        echo "[setup] ERROR: unsupported RENDER_BACKEND=$RENDER_BACKEND (expected egl or osmesa)."
+        exit 1
+        ;;
+esac
 if [ ! -f "$LIBERO_CONFIG_PATH/config.yaml" ]; then
     mkdir -p "$LIBERO_CONFIG_PATH"
     root="$LIBERO_HOME/libero/libero"
@@ -83,8 +109,11 @@ EOF
 fi
 
 # ---------------- output paths ----------------
-folder_name=$(echo "$CKPT" | awk -F'/' '{print $(NF-2)"_"$(NF-1)"_"$NF}')
-out_root="${STARVLA_DIR}/playground/eval_results/${folder_name}"
+model_root="$(dirname "$(dirname "$CKPT")")"   # .../<run_id> for final_model/pytorch_model.pt or checkpoints/*.pt
+ckpt_dir_name="$(basename "$(dirname "$CKPT")")"
+ckpt_file_name="$(basename "$CKPT")"
+folder_name="${ckpt_dir_name}_${ckpt_file_name%.*}"
+out_root="${EVAL_ROOT:-${model_root}/eval_results/${folder_name}}"
 log_path="${out_root}/logs"
 res_path="${out_root}/results"
 mkdir -p "$log_path" "$res_path"
@@ -92,6 +121,7 @@ mkdir -p "$log_path" "$res_path"
 echo "=========================================="
 echo " Fast parallel LIBERO eval"
 echo " ckpt            : $CKPT"
+echo " output root     : $out_root"
 echo " task suites     : ${TASK_SUITES[*]}"
 echo " gpus            : ${GPU_LIST[*]}  (${SERVERS_PER_GPU} server(s) each)"
 echo " shards/suite    : $SHARDS_PER_SUITE   num_trials: $NUM_TRIALS   max_tasks: $MAX_TASKS"
@@ -218,10 +248,9 @@ PYEOF
 # ---------------- 5) upload results to the checkpoint's hdfs dir ----------------
 # Maps the local FUSE path (/mnt/hdfs/data/dumengfei/...) to its hdfs:// URL and
 # uploads eval_results under the checkpoint dir, e.g.
-#   hdfs://.../Checkpoints/<run_id>/eval_results/<folder_name>/{logs,videos,results}
+#   hdfs://.../<run_id>/eval_results/<folder_name>/{logs,videos,results}
 if [ "${UPLOAD_TO_HDFS:-1}" != "0" ] && command -v hdfs >/dev/null 2>&1; then
-    model_root="$(dirname "$(dirname "$CKPT")")"   # .../Checkpoints/<run_id>
-    HDFS_LOCAL_PREFIX="${HDFS_LOCAL_PREFIX:-/mnt/hdfs/data/dumengfei}"
+    HDFS_LOCAL_PREFIX="${HDFS_LOCAL_PREFIX:-/aifs4su/hansirui_4th/dumengfei/experiments}"
     HDFS_URL_PREFIX="${HDFS_URL_PREFIX:-hdfs://haruna/home/byte_data_seed/hdd_hldy/iccv/user/dumengfei}"
     if [[ "$model_root" != "$HDFS_LOCAL_PREFIX"* ]]; then
         echo "[upload] skip: $model_root is not under $HDFS_LOCAL_PREFIX (set HDFS_LOCAL_PREFIX/HDFS_URL_PREFIX)"
@@ -232,7 +261,7 @@ if [ "${UPLOAD_TO_HDFS:-1}" != "0" ] && command -v hdfs >/dev/null 2>&1; then
         hdfs dfs -rm -r -f "$hdfs_dest/$(basename "$out_root")" >/dev/null 2>&1
         if hdfs dfs -put -f "$out_root" "$hdfs_dest/"; then
             echo "[upload] OK -> $hdfs_dest/$(basename "$out_root")"
-            if [ "${KEEP_LOCAL_RESULTS:-0}" = "0" ]; then
+            if [ "${KEEP_LOCAL_RESULTS:-1}" = "0" ]; then
                 rm -rf "$out_root"
                 echo "[upload] removed local $out_root (set KEEP_LOCAL_RESULTS=1 to keep)"
             fi
