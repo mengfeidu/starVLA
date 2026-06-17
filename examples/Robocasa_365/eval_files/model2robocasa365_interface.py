@@ -15,6 +15,12 @@ from deployment.model_server.tools.websocket_policy_client import WebsocketClien
 from examples.Robocasa_tabletop.eval_files.adaptive_ensemble import AdaptiveEnsembler
 
 
+VIDEO_KEY_ORDER = [
+    "video.robot0_agentview_left",
+    "video.robot0_agentview_right",
+    "video.robot0_eye_in_hand",
+]
+
 # Order MUST match the LeRobot dataset ``observation.state`` produced by
 # ``robocasa/scripts/dataset_scripts/convert_hdf5_lerobot.py``:
 #   base_position(3) + base_rotation(4) + eef_pos_rel(3) + eef_rot_rel(4) + gripper_qpos(2) = 16
@@ -89,10 +95,15 @@ class PolicyWarper:
         if instructions[0] != self.task_description:
             self.reset(instructions[0])
 
-        # 2) image — the tabletop multi-view env returns (B, n_obs, H, W, 3); we use the
-        # left agentview (the same one used during training).
-        view = observations["video.robot0_agentview_left"]  # (B, 1, H, W, 3)
-        images = [[self._resize_image(img) for img in sample] for sample in view]
+        # 2) images — keep the same camera order as PandaOmronRoboCasa365DataConfig.
+        views = [observations[key] for key in VIDEO_KEY_ORDER]  # each (B, 1, H, W, 3)
+        batch_size = views[0].shape[0]
+        images = []
+        for b in range(batch_size):
+            sample_images = []
+            for view in views:
+                sample_images.extend(self._resize_image(img) for img in view[b])
+            images.append(sample_images)
 
         # 3) state — concatenate parts in the same order as in training
         state_parts = [observations[k] for k in STATE_KEY_ORDER]  # each (B, 1, d)

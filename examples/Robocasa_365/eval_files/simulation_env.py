@@ -34,6 +34,59 @@ from examples.Robocasa_tabletop.eval_files.wrappers.video_recording_wrapper impo
     VideoRecordingWrapper,
 )
 
+TARGET_TASK_NAMES = [
+    "CloseBlenderLid",
+    "CloseFridge",
+    "CloseToasterOvenDoor",
+    "CoffeeSetupMug",
+    "NavigateKitchen",
+    "OpenCabinet",
+    "OpenDrawer",
+    "OpenStandMixerHead",
+    "PickPlaceCounterToCabinet",
+    "PickPlaceCounterToStove",
+    "PickPlaceDrawerToCounter",
+    "PickPlaceSinkToCounter",
+    "PickPlaceToasterToCounter",
+    "SlideDishwasherRack",
+    "TurnOffStove",
+    "TurnOnElectricKettle",
+    "TurnOnMicrowave",
+    "TurnOnSinkFaucet",
+    "ArrangeBreadBasket",
+    "ArrangeTea",
+    "BreadSelection",
+    "CategorizeCondiments",
+    "CuttingToolSelection",
+    "DeliverStraw",
+    "GarnishPancake",
+    "GatherTableware",
+    "GetToastedBread",
+    "HeatKebabSandwich",
+    "KettleBoiling",
+    "LoadDishwasher",
+    "MakeIceLemonade",
+    "PackIdenticalLunches",
+    "PanTransfer",
+    "PortionHotDogs",
+    "PreSoakPan",
+    "PrepareCoffee",
+    "RecycleBottlesByType",
+    "RinseSinkBasin",
+    "ScrubCuttingBoard",
+    "SearingMeat",
+    "SeparateFreezerRack",
+    "SetUpCuttingStation",
+    "StackBowlsCabinet",
+    "SteamInMicrowave",
+    "StirVegetables",
+    "StoreLeftoversInBowl",
+    "WaffleReheat",
+    "WashFruitColander",
+    "WashLettuce",
+    "WeighIngredients",
+]
+
 
 @dataclass
 class VideoConfig:
@@ -125,12 +178,29 @@ def run_simulation(model: PolicyWarper, config: SimulationConfig) -> Tuple[str, 
     return config.env_name, episode_successes
 
 
+def _parse_task_ids(task_ids: str) -> List[int]:
+    if not task_ids.strip():
+        return []
+    ids = [int(x) for x in task_ids.replace(",", " ").split()]
+    invalid = [x for x in ids if x < 0 or x >= len(TARGET_TASK_NAMES)]
+    if invalid:
+        raise ValueError(f"task_ids {invalid} out of range [0, {len(TARGET_TASK_NAMES)})")
+    return ids
+
+
+def _video_dir_for_task(video_out_path: Optional[str], task_name: str) -> Optional[str]:
+    if video_out_path is None:
+        return None
+    return str(Path(video_out_path) / task_name)
+
+
 @dataclasses.dataclass
 class Args:
     host: str = "127.0.0.1"
     port: int = 5678
     resize_size: tuple = (224, 224)
     env_name: str = "robocasa/OpenDrawer"
+    task_ids: str = ""
     n_episodes: int = 5
     n_envs: int = 1
     max_episode_steps: int = 500
@@ -141,6 +211,7 @@ class Args:
         "playground/Checkpoints/robocasa365_qwenoft_OpenDrawer_100step/checkpoints/steps_100_pytorch_model.pt"
     )
     unnorm_key: Optional[str] = None
+    result_json: str = ""
 
 
 def main(args: Args) -> None:
@@ -153,23 +224,59 @@ def main(args: Args) -> None:
         image_size=args.resize_size,
         n_action_steps=args.n_action_steps,
     )
-    cfg = SimulationConfig(
-        env_name=args.env_name,
-        n_episodes=args.n_episodes,
-        n_envs=args.n_envs,
-        video=VideoConfig(video_dir=args.video_out_path),
-        multistep=MultiStepConfig(
-            n_action_steps=args.n_action_steps, max_episode_steps=args.max_episode_steps
-        ),
-    )
-    name, successes = run_simulation(model, cfg)
-    sr = float(np.mean(successes)) if successes else 0.0
-    print(f"\n=== {name} ===")
-    print(f"success rate: {sr:.2f} ({sum(successes)}/{len(successes)})")
-    out_dir = Path(args.pretrained_path).with_suffix(".eval")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    with (out_dir / f"{name.replace('/', '_')}.json").open("w") as f:
-        json.dump({"env": name, "success_rate": sr, "successes": [bool(s) for s in successes]}, f, indent=2)
+    task_ids = _parse_task_ids(args.task_ids)
+    env_names = [f"robocasa/{TARGET_TASK_NAMES[i]}" for i in task_ids] if task_ids else [args.env_name]
+
+    task_results = []
+    total_successes = 0
+    total_episodes = 0
+    for env_name in env_names:
+        task_name = env_name.split("/", 1)[-1]
+        cfg = SimulationConfig(
+            env_name=env_name,
+            n_episodes=args.n_episodes,
+            n_envs=args.n_envs,
+            video=VideoConfig(video_dir=_video_dir_for_task(args.video_out_path, task_name)),
+            multistep=MultiStepConfig(
+                n_action_steps=args.n_action_steps, max_episode_steps=args.max_episode_steps
+            ),
+        )
+        name, successes = run_simulation(model, cfg)
+        num_successes = int(sum(successes))
+        num_episodes = len(successes)
+        sr = float(np.mean(successes)) if successes else 0.0
+        total_successes += num_successes
+        total_episodes += num_episodes
+        task_results.append(
+            {
+                "env": name,
+                "success_rate": sr,
+                "total_episodes": num_episodes,
+                "total_successes": num_successes,
+                "successes": [bool(s) for s in successes],
+            }
+        )
+        print(f"\n=== {name} ===")
+        print(f"success rate: {sr:.2f} ({num_successes}/{num_episodes})")
+
+    overall_sr = (total_successes / total_episodes) if total_episodes else 0.0
+    summary = {
+        "task_ids": task_ids,
+        "env_names": env_names,
+        "total_episodes": total_episodes,
+        "total_successes": total_successes,
+        "success_rate": overall_sr,
+        "task_results": task_results,
+    }
+
+    out_path = Path(args.result_json) if args.result_json else None
+    if out_path is None:
+        out_dir = Path(args.pretrained_path).with_suffix(".eval")
+        out_path = out_dir / f"{'_'.join(name.replace('/', '_') for name in env_names)}.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w") as f:
+        json.dump(summary, f, indent=2)
+    print(f"[robocasa365] wrote result summary to {out_path}")
 
 
 if __name__ == "__main__":

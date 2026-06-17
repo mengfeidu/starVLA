@@ -5,11 +5,13 @@ set -euo pipefail
 
 CKPT=${CKPT:-./playground/Checkpoints/robocasa365_qwenoft_OpenDrawer_100step/checkpoints/steps_100_pytorch_model.pt}
 ENV_NAME=${ENV_NAME:-robocasa/OpenDrawer}
+TASK_IDS=${TASK_IDS:-}
 PORT=${PORT:-5678}
 N_EPISODES=${N_EPISODES:-5}
 N_ENVS=${N_ENVS:-1}
 MAX_STEPS=${MAX_STEPS:-500}
 N_ACT=${N_ACT:-8}
+RESULT_JSON=${RESULT_JSON:-}
 
 case "${1:-}" in
   server)
@@ -24,11 +26,13 @@ case "${1:-}" in
     exec python -m examples.Robocasa_365.eval_files.simulation_env \
       --args.pretrained-path "${CKPT}" \
       --args.env-name "${ENV_NAME}" \
+      --args.task-ids "${TASK_IDS}" \
       --args.port "${PORT}" \
       --args.n-episodes "${N_EPISODES}" \
       --args.n-envs "${N_ENVS}" \
       --args.max-episode-steps "${MAX_STEPS}" \
-      --args.n-action-steps "${N_ACT}"
+      --args.n-action-steps "${N_ACT}" \
+      --args.result-json "${RESULT_JSON}"
     ;;
   *)
     cat <<USAGE
@@ -38,7 +42,7 @@ Usage:
   # terminal 2 (conda env robocasa365):
   bash examples/Robocasa_365/eval_files/run_eval.sh client
 
-Override defaults with env vars: CKPT, ENV_NAME, PORT, N_EPISODES, N_ENVS, MAX_STEPS, N_ACT.
+Override defaults with env vars: CKPT, ENV_NAME, TASK_IDS, PORT, N_EPISODES, N_ENVS, MAX_STEPS, N_ACT, RESULT_JSON.
 USAGE
     ;;
 esac
